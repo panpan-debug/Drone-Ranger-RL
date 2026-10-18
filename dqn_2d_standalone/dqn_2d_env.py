@@ -253,7 +253,7 @@ class DroneNav2DEnv:
         rew_reached = reached.float() * 100.0
         rew_crashed = crashed.float() * -50.0
 
-        total = rew_progress + rew_reached + rew_crashed
+        total = rew_progress + rew_reached + rew_crashed - self.cfg.living_cost
         if return_breakdown:
             return total, {
                 "rew_progress": rew_progress, "rew_reached": rew_reached,

@@ -1,10 +1,11 @@
 # Training artifacts -- not source code, not tracked
-dqn/checkpoints/
-dqn/tensorboard/
+checkpoints/
+tensorboard/
 *.pt
 *.log
 
 # Python
+.venv/
 __pycache__/
 *.pyc
 

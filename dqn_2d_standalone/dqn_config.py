@@ -51,6 +51,7 @@ class DQNConfig:
     first_obstacle_on_path: int = 1   # 1 = obstacle #0 is spawned on the start->target segment
     sense_range: float = 10.0     # m, obstacles whose surface is farther than this are invisible
     state_scale: float = 10.0     # state is divided by this (1.0 = old unnormalised scale)
+    living_cost: float = 0.0      # per-step survival penalty (0 = off; try 0.02)
 
     @property
     def state_dim(self) -> int:
