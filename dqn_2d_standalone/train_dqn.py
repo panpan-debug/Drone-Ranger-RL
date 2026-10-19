@@ -40,6 +40,12 @@ parser.add_argument("--run_name", type=str, default=None, help="name for this ru
 parser.add_argument("--output_dir", type=str, default=SCRIPT_DIR,
                      help="base directory for checkpoints/ and tensorboard/ subdirectories; "
                           "defaults to this script's own directory")
+parser.add_argument("--mirror_augment", type=int, default=0,
+                     help="E7: 1 = also push a left-right mirrored copy of every "
+                          "experience (flip dy/oy, swap turn_left/turn_right). "
+                          "Targets the diagnosed right-turn blindness (q_sweep: "
+                          "0%% turn_right picks at heading<-5deg). Off by default; "
+                          "enable explicitly so A/B runs stay single-variable.")
 add_config_args(parser)
 args = parser.parse_args()
 cfg: DQNConfig = config_from_args(args)
@@ -93,6 +99,25 @@ elif args.resume_from:
     print("[DQN] resumed weights but NOT optimizer state (no --resume_optimizer_from given) -- Adam's per-parameter momentum starts fresh this run")
 replay_buffer = ReplayBuffer(cfg.replay_buffer_size)
 
+# ── E7: left-right mirror augmentation ──
+# The task is laterally symmetric in the body frame: for every experience
+# (s, a, r, s'), the mirrored tuple (flip dy/oy, swap turn_left<->turn_right,
+# same reward) is an equally valid experience the policy could have had.
+# Pushing both forces the Q-network to see symmetric data, countering the
+# self-reinforcing left-turn bias diagnosed via q_sweep (turn_right pick
+# rate was 0% at heading < -5 deg in the 3-obstacle baseline).
+_K_SLOTS = min(cfg.k_nearest, cfg.num_obstacles)
+_MIRROR_ACTION = {0: 0, 1: 2, 2: 1}  # forward stays, left<->right
+
+def mirror_state_vec(s):
+    """Mirror one flat state vector (body frame, already scaled):
+    [dx, dy, ox_1, oy_1, r_1, ...] -> lateral components negated."""
+    m = s.clone()
+    m[1] = -m[1]                                    # dy
+    for slot in range(_K_SLOTS):
+        m[2 + 3 * slot + 1] = -m[2 + 3 * slot + 1]  # oy of each slot
+    return m
+
 epsilon = cfg.resume_epsilon if args.resume_from else cfg.epsilon_start
 episode_returns = []
 
@@ -109,6 +134,7 @@ print(f"  max_steps/ep    : {args.max_steps_per_episode}")
 print(f"  hidden_dim      : {cfg.hidden_dim}")
 print(f"  state_dim       : {cfg.state_dim}  (num_obstacles={cfg.num_obstacles}, k_nearest={cfg.k_nearest}, state_scale={cfg.state_scale})")
 print(f"  resume_from     : {args.resume_from or '(from scratch)'}")
+print(f"  mirror_augment  : {bool(args.mirror_augment)}")
 print(f"  checkpoints dir : {checkpoints_dir}")
 print(f"  tensorboard log : {log_dir}")
 print("=" * 70)
@@ -143,6 +169,14 @@ for episode in range(args.num_episodes):
                 state[i].cpu(), action_idx[i].item(), reward[i].item(),
                 next_state[i].cpu(), done[i].item()
             )
+            if args.mirror_augment:
+                replay_buffer.push(
+                    mirror_state_vec(state[i].cpu()),
+                    _MIRROR_ACTION[action_idx[i].item()],
+                    reward[i].item(),
+                    mirror_state_vec(next_state[i].cpu()),
+                    done[i].item()
+                )
 
         if done.any():
             unwrapped = env.unwrapped
