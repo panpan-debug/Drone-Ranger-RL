@@ -46,6 +46,12 @@ parser.add_argument("--mirror_augment", type=int, default=0,
                           "Targets the diagnosed right-turn blindness (q_sweep: "
                           "0%% turn_right picks at heading<-5deg). Off by default; "
                           "enable explicitly so A/B runs stay single-variable.")
+parser.add_argument("--eval_episodes", type=int, default=64,
+                     help="episodes per periodic greedy eval (fixed scenario "
+                          "stream); the best-seen weights are kept in "
+                          "<run_name>_best.pt. Motivation: E1 formal run showed "
+                          "late-training instability (peak ep1000=30%%, final "
+                          "collapsed to 5.4%%) -- never ship the raw final again.")
 add_config_args(parser)
 args = parser.parse_args()
 cfg: DQNConfig = config_from_args(args)
@@ -118,6 +124,40 @@ def mirror_state_vec(s):
         m[2 + 3 * slot + 1] = -m[2 + 3 * slot + 1]  # oy of each slot
     return m
 
+
+# ── Periodic greedy eval + best-checkpoint keeping ──
+# Motivation: the E1 formal run (3000 episodes) peaked at ep1000 (30%
+# reached) and then collapsed to 5.4% by the final episode -- late DQN
+# training is unstable, so "final" is NOT a deliverable. Every eval cadence
+# we roll out the greedy policy on a FIXED scenario stream (same seed every
+# time, so evals are comparable across episodes) and keep the best-seen
+# weights in <run_name>_best.pt. Training RNG state is saved/restored
+# around the eval so the training trajectory is bit-identical to a run
+# without evals.
+EVAL_SEED = 1000
+
+def quick_eval(q_net, num_episodes):
+    rng_state = torch.get_rng_state()
+    torch.manual_seed(EVAL_SEED)
+    eval_env = DroneNav2DEnv(num_envs=args.num_envs, cfg=cfg, device=device)
+    obs_dict, _ = eval_env.reset()
+    state = obs_dict["dqn_state"]
+    reached = done_count = 0
+    while done_count < num_episodes:
+        with torch.no_grad():
+            action_idx = q_net(state).argmax(dim=-1)
+        cont = discrete_action_to_continuous(action_idx, device)
+        obs_dict, _, terminated, truncated, _ = eval_env.step(cont)
+        done = terminated | truncated
+        if done.any():
+            for i in done.nonzero(as_tuple=True)[0].tolist():
+                if eval_env._last_reached_flag[i].item():
+                    reached += 1
+                done_count += 1
+        state = obs_dict["dqn_state"]
+    torch.set_rng_state(rng_state)
+    return reached / done_count
+
 epsilon = cfg.resume_epsilon if args.resume_from else cfg.epsilon_start
 episode_returns = []
 
@@ -148,6 +188,7 @@ episode_return = torch.zeros(args.num_envs, device=device)
 WINDOW_SIZE = 200
 outcome_window = deque(maxlen=WINDOW_SIZE)
 global_train_step = 0
+best_eval = -1.0  # best greedy reached-fraction seen so far (for _best.pt)
 
 for episode in range(args.num_episodes):
     for step in range(args.max_steps_per_episode):
@@ -261,6 +302,15 @@ for episode in range(args.num_episodes):
         print("-" * 70)
         print(f"[DQN] checkpoint saved: {ckpt_path}")
         print("-" * 70)
+        eval_pct = quick_eval(q_net, args.eval_episodes)
+        writer.add_scalar("Eval/reached_pct", eval_pct * 100, episode)
+        print(f"[EVAL] episode {episode}: greedy reached = {eval_pct*100:.1f}% "
+              f"(fixed scenarios, n={args.eval_episodes})")
+        if eval_pct > best_eval:
+            best_eval = eval_pct
+            best_path = os.path.join(checkpoints_dir, f"{run_name}_best.pt")
+            torch.save(q_net.state_dict(), best_path)
+            print(f"[EVAL] new best ({eval_pct*100:.1f}%) -> {best_path}")
 
 print("=" * 70)
 final_ckpt = os.path.join(checkpoints_dir, f"{run_name}_final.pt")
@@ -270,6 +320,9 @@ torch.save(optimizer.state_dict(), final_opt)
 total_elapsed = time.time() - train_start_time
 print(f"[DQN] Training complete. Final checkpoint saved: {final_ckpt}")
 print(f"[DQN] Optimizer state saved: {final_opt}")
+if best_eval >= 0:
+    print(f"[DQN] Best greedy reached during training: {best_eval*100:.1f}% "
+          f"(weights in {run_name}_best.pt -- prefer this over final for delivery)")
 print(f"[DQN] Total time: {total_elapsed/60:.1f} minutes")
 print(f"[DQN] tensorboard: tensorboard --logdir {tensorboard_dir}")
 print("=" * 70)
