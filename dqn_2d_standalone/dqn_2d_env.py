@@ -254,6 +254,18 @@ class DroneNav2DEnv:
         rew_crashed = crashed.float() * -50.0
 
         total = rew_progress + rew_reached + rew_crashed - self.cfg.living_cost
+
+        # E12: obstacle proximity shaping -- previously the ONLY obstacle
+        # signal in the reward was the binary -50 crash, so the network got
+        # no gradient for "getting close is risky" until it was too late.
+        # Linear ramp: 0 penalty at >=1m surface distance, full penalty at
+        # contact. Parked (FAR_AWAY) obstacles are naturally unaffected.
+        if self.cfg.obstacle_proximity_penalty > 0 and self.num_obstacles > 0:
+            surf = (torch.norm(self.obs_pos - self.pos[:, None, :], dim=-1)
+                    .min(dim=1).values - self.cfg.obstacle_radius)
+            prox = torch.clamp(1.0 - surf, min=0.0)
+            total = total - self.cfg.obstacle_proximity_penalty * prox
+
         if return_breakdown:
             return total, {
                 "rew_progress": rew_progress, "rew_reached": rew_reached,

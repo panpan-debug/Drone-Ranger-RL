@@ -52,6 +52,14 @@ parser.add_argument("--eval_episodes", type=int, default=64,
                           "<run_name>_best.pt. Motivation: E1 formal run showed "
                           "late-training instability (peak ep1000=30%%, final "
                           "collapsed to 5.4%%) -- never ship the raw final again.")
+parser.add_argument("--time_limit_aware", type=int, default=0,
+                     help="E9: 1 = bootstrap through time-limit truncations "
+                          "(zero the TD target only on TRUE termination: "
+                          "reached/crashed). Default 0 keeps the legacy "
+                          "behaviour where timed-out episodes are treated as "
+                          "terminal -- diagnosed as a likely bug: with 65-80%% "
+                          "of episodes timing out, most bootstrap paths to the "
+                          "+100 goal reward get cut (cf. Pardo et al. 2018).")
 add_config_args(parser)
 args = parser.parse_args()
 cfg: DQNConfig = config_from_args(args)
@@ -206,9 +214,14 @@ for episode in range(args.num_episodes):
         done = terminated | truncated
 
         for i in range(args.num_envs):
+            # E9: with --time_limit_aware, the TD target is zeroed only on
+            # true termination (reached/crashed); timeouts keep their
+            # bootstrap value. s_next is valid even for truncated episodes
+            # (env computes obs before auto-resampling finished envs).
+            done_for_bootstrap = terminated[i].item() if args.time_limit_aware else done[i].item()
             replay_buffer.push(
                 state[i].cpu(), action_idx[i].item(), reward[i].item(),
-                next_state[i].cpu(), done[i].item()
+                next_state[i].cpu(), done_for_bootstrap
             )
             if args.mirror_augment:
                 replay_buffer.push(
@@ -216,7 +229,7 @@ for episode in range(args.num_episodes):
                     _MIRROR_ACTION[action_idx[i].item()],
                     reward[i].item(),
                     mirror_state_vec(next_state[i].cpu()),
-                    done[i].item()
+                    done_for_bootstrap
                 )
 
         if done.any():

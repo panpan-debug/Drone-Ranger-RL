@@ -52,6 +52,9 @@ class DQNConfig:
     sense_range: float = 10.0     # m, obstacles whose surface is farther than this are invisible
     state_scale: float = 10.0     # state is divided by this (1.0 = old unnormalised scale)
     living_cost: float = 0.0      # per-step survival penalty (0 = off; try 0.02)
+    obstacle_proximity_penalty: float = 0.0  # E12: per-step penalty scaled by
+                                  # proximity to the nearest obstacle surface:
+                                  # 0 at >=1m, full value at contact (0 = off)
 
     @property
     def state_dim(self) -> int:
